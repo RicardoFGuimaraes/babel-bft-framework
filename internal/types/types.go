@@ -1,84 +1,65 @@
 package types
 
-import "time"
+import (
+	"crypto/sha256"
+	"fmt"
+	"strconv"
+)
 
-// --- Estruturas de Dados ---
+// Constants for message types
+const (
+	TxMsg = iota
+	ConsensusMsg
+)
 
+// Message is the generic container for all communications between nodes.
+type Message struct {
+	Type    int
+	From    uint
+	Payload interface{}
+}
+
+// Transaction represents a client's request to be processed by the state machine.
 type Transaction struct {
-	ID        string
+	ClientID  uint
+	Timestamp int64
 	Payload   []byte
-	Timestamp time.Time
 }
 
+// Block is a collection of transactions that will be atomically applied to the state machine.
 type Block struct {
+	ProposerID   uint
 	Transactions []*Transaction
-	// Outros campos como Header, ProposerID, etc.
+	HashCache    []byte
 }
 
-// --- Tipos de Mensagens de Consenso ---
-
-type ConsensusMessage interface {
-	GetHeight() int
-	GetRound() int
+// Hash calculates and returns the SHA-256 hash of the block.
+// The hash is cached for performance.
+func (b *Block) Hash() []byte {
+	if b.HashCache != nil {
+		return b.HashCache
+	}
+	h := sha256.New()
+	h.Write([]byte(strconv.Itoa(int(b.ProposerID))))
+	for _, tx := range b.Transactions {
+		h.Write([]byte(strconv.Itoa(int(tx.ClientID))))
+		h.Write([]byte(strconv.FormatInt(tx.Timestamp, 10)))
+		h.Write(tx.Payload)
+	}
+	b.HashCache = h.Sum(nil)
+	return b.HashCache
 }
 
-type ProposalMessage struct {
-	Height int
-	Round  int
-	Block  *Block
+// String provides a simple string representation of the block.
+func (b *Block) String() string {
+	return fmt.Sprintf("Block{Proposer: %d, Txs: %d, Hash: %x}", b.ProposerID, len(b.Transactions), b.Hash())
 }
 
-func (m ProposalMessage) GetHeight() int { return m.Height }
-func (m ProposalMessage) GetRound() int  { return m.Round }
-
-type VoteType string
-
-const (
-	Prevote   VoteType = "PREVOTE"
-	Precommit VoteType = "PRECOMMIT"
-)
-
-type VoteMessage struct {
-	Height int
-	Round  int
-	Type   VoteType
-	// BlockID // Hash do bloco pelo qual se está votando
-}
-
-func (m VoteMessage) GetHeight() int { return m.Height }
-func (m VoteMessage) GetRound() int  { return m.Round }
-
-// --- Tipos de Eventos ---
-
-// TransactionEvent representa uma nova transação chegando ao sistema.
-type TransactionEvent struct {
-	Tx *Transaction
-}
-
-// MessageEvent representa uma mensagem de consenso recebida da rede.
-type MessageEvent struct {
-	SenderID int
-	Message  ConsensusMessage
-}
-
-// TimeoutEvent representa a expiração de um temporizador de consenso.
-type TimeoutEvent struct {
-	Height int
-	Round  int
-	Step   ConsensusStep
-}
-
-// ConsensusStep representa as fases dentro de uma rodada do Tendermint.
-type ConsensusStep string
-
-const (
-	StepPropose   ConsensusStep = "PROPOSE"
-	StepPrevote   ConsensusStep = "PREVOTE"
-	StepPrecommit ConsensusStep = "PRECOMMIT"
-	StepCommit    ConsensusStep = "COMMIT"
-)
-
-type Event interface {
-	// Type retorna o tipo do evento para despacho.
-	Type() string
+// NodeInterface defines the set of methods that the consensus engine can use
+// to interact with the underlying node, abstracting away the network and core logic.
+type NodeInterface interface {
+	ID() uint
+	QuorumSize() int
+	Broadcast(msg *Message)
+	Send(recipientID uint, msg *Message)
 }

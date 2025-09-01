@@ -20,7 +20,7 @@ func NewWorker() *Worker {
 	// TODO: A inicialização do nó deve ser mais sofisticada,
 	// recebendo configuração do mestre.
 	metricsCollector := metrics.NewCollector()
-	node := core.NewNode(0, metricsCollector) // ID 0 é um placeholder
+	node := core.NewNode(0, metricsCollector) // id 0 é um placeholder
 	return &Worker{node: node}
 }
 

@@ -1,89 +1,89 @@
+// File: internal/protocols/tendermint/pacemaker.go
 package tendermint
 
 import (
-	"babel-bft/internal/core"
 	"babel-bft/internal/types"
 	"log"
+	"time"
 )
 
-// Pacemaker implementa a lógica de coordenação do Tendermint.
+// Pacemaker is responsible for ensuring the liveness of the Tendermint protocol.
+// It uses timeouts to trigger round changes when progress is not being made.
 type Pacemaker struct {
-	node *core.Node
-
-	// Estado do Tendermint
-	height int
-	round  int
-	step   types.ConsensusStep
-	// Mais estados: lockedValue, lockedRound, etc.
+	protocol   *Tendermint
+	node       types.NodeInterface
+	timer      *time.Timer
+	timeout    time.Duration
+	active     bool
+	round      int
+	lastHeard  time.Time
+	isProposer bool
 }
 
-// NewPacemaker cria um novo pacemaker para o Tendermint.
-func NewPacemaker(node *core.Node) *Pacemaker {
+// NewPacemaker creates a new Pacemaker instance.
+func NewPacemaker(protocol *Tendermint) *Pacemaker {
 	return &Pacemaker{
-		node:   node,
-		height: 1,
-		round:  0,
-		step:   types.StepPropose,
+		protocol: protocol,
+		// Timeout duration should be configurable
+		timeout: 5 * time.Second,
+		active:  false,
 	}
 }
 
-func (p *Pacemaker) HandleTransaction(event *types.TransactionEvent) {
-	// Lógica do líder para criar um bloco e iniciar uma nova rodada
-	if p.isLeader() {
-		log.Printf("[Nó %d] [H:%d, R:%d] Sou o líder, propondo novo bloco.", p.node.ID, p.height, p.round)
-		proposal := types.ProposalMessage{
-			Height: p.height,
-			Round:  p.round,
-			Block:  &types.Block{Transactions: []*types.Transaction{event.Tx}},
+// Start initiates the pacemaker for a given round.
+func (p *Pacemaker) Start(isProposer bool) {
+	p.isProposer = isProposer
+	p.active = true
+	p.resetTimer()
+	log.Printf("Node %d: Pacemaker started for round %d", p.node.ID(), p.protocol.state.Round)
+	go p.run()
+}
+
+// Stop deactivates the pacemaker.
+func (p *Pacemaker) Stop() {
+	p.active = false
+	if p.timer != nil {
+		p.timer.Stop()
+	}
+	log.Printf("Node %d: Pacemaker stopped for round %d", p.node.ID(), p.protocol.state.Round)
+}
+
+// Internal run loop for the pacemaker timer.
+func (p *Pacemaker) run() {
+	for p.active {
+		<-p.timer.C
+		if p.active {
+			p.handleTimeout()
 		}
-		p.node.GetNetwork().Broadcast(p.node.ID, proposal)
-		p.step = types.StepPrevote
-		p.node.Metrics.RecordEvent("proposal_sent")
 	}
 }
 
-func (p *Pacemaker) HandleConsensusMessage(event *types.MessageEvent) {
-	// Lógica para processar mensagens de Propose, Prevote, Precommit
-	switch msg := event.Message.(type) {
-	case types.ProposalMessage:
-		log.Printf("[Nó %d] [H:%d, R:%d] Proposta recebida do nó %d.", p.node.ID, msg.Height, msg.Round, event.SenderID)
-		// 1. Validar proposta
-		// 2. Enviar Prevote
-		prevote := types.VoteMessage{
-			Height: msg.Height,
-			Round:  msg.Round,
-			Type:   types.Prevote,
-		}
-		p.node.GetNetwork().Broadcast(p.node.ID, prevote)
-		p.step = types.StepPrecommit
-		p.node.Metrics.RecordEvent("prevote_sent")
+// handleTimeout is called when the timer expires. It triggers a new round.
+func (p *Pacemaker) handleTimeout() {
+	currentHeight, currentRound, _ := p.protocol.state.GetHeightRoundStep()
+	log.Printf("Node %d: Pacemaker timeout! H:%d R:%d. Advancing to next round.", p.node.ID(), currentHeight, currentRound)
 
-	case types.VoteMessage:
-		// Lógica para contar votos e avançar para o próximo passo ou decidir
-		log.Printf("[Nó %d] [H:%d, R:%d] Voto '%s' recebido do nó %d.", p.node.ID, msg.Height, msg.Round, msg.Type, event.SenderID)
-		// TODO: Implementar a lógica de contagem de quórum (2f+1)
-		// Se quórum de Prevotes -> envia Precommit
-		// Se quórum de Precommits -> decide o bloco, incrementa a altura e inicia nova rodada
-		p.node.Metrics.RecordEvent("block_decided")
-		p.height++
-		p.round = 0
-		p.step = types.StepPropose
-		log.Printf("[Nó %d] Bloco decidido! Avançando para a altura %d.", p.node.ID, p.height)
+	// Advance to the next round in the protocol state
+	p.protocol.state.IncrementRound()
+
+	// Propose nil and broadcast prevote for nil
+	// This is part of the Tendermint recovery mechanism
+	prevote := &PrevoteMessage{
+		Height: currentHeight,
+		Round:  p.protocol.state.Round,
+		Hash:   nil, // Nil prevote
 	}
+	p.node.Broadcast(&types.Message{Type: PrevoteType, Payload: prevote})
+
+	// Reset the timer for the new round
+	p.resetTimer()
 }
 
-func (p *Pacemaker) HandleTimeout(event *types.TimeoutEvent) {
-	// Lógica para lidar com timeouts, e.g., avançar para a próxima rodada
-	log.Printf("[Nó %d] [H:%d, R:%d] Timeout! Avançando para a rodada %d.", p.node.ID, p.height, p.round, p.round+1)
-	p.round++
-	p.step = types.StepPropose
-	// O novo líder (se for este nó) irá propor.
-}
-
-// isLeader verifica se o nó atual é o líder para a rodada atual.
-func (p *Pacemaker) isLeader() bool {
-	// Lógica de rotação de líder simples (round-robin)
-	// TODO: Obter o número total de nós da configuração
-	numNodes := 4
-	return p.node.ID == p.round%numNodes
+// resetTimer resets the timeout timer.
+func (p *Pacemaker) resetTimer() {
+	if p.timer != nil {
+		p.timer.Stop()
+	}
+	p.timer = time.NewTimer(p.timeout)
+	p.lastHeard = time.Now()
 }

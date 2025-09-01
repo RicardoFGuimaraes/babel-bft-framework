@@ -1,68 +1,77 @@
 package metrics
 
 import (
-	"encoding/json"
-	"os"
-	"path/filepath"
+	"babel-bft/internal/types"
+	"log"
 	"sync"
 	"time"
 )
 
-// Collector é responsável por coletar e agregar métricas de performance.
+// Collector is responsible for gathering and storing performance metrics
+// during an experiment run, such as transaction latency and throughput.
 type Collector struct {
-	mu        sync.Mutex
-	events    map[string]int
-	latencies map[string][]time.Duration
+	mu           sync.Mutex
+	startTime    time.Time
+	txTimestamps map[string]int64 // Map transaction hash/ID to its start time
+	latencies    []float64
+	txCount      int
 }
 
-// NewCollector cria uma nova instância do coletor de métricas.
+// NewCollector creates a new metrics collector.
 func NewCollector() *Collector {
 	return &Collector{
-		events:    make(map[string]int),
-		latencies: make(map[string][]time.Duration),
+		txTimestamps: make(map[string]int64),
+		latencies:    make([]float64, 0),
 	}
 }
 
-// RecordEvent incrementa um contador para um evento nomeado.
-func (c *Collector) RecordEvent(name string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.events[name]++
+// Start begins the collection period.
+func (c *Collector) Start() {
+	c.startTime = time.Now()
+	log.Println("Metrics collection started.")
 }
 
-// RecordLatency registra uma medição de latência para uma operação nomeada.
-func (c *Collector) RecordLatency(name string, d time.Duration) {
+// AddTransaction marks the submission time of a transaction.
+func (c *Collector) AddTransaction(tx *types.Transaction) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.latencies[name] = append(c.latencies[name], d)
+	// Using a simple string representation as a key. A hash would be better.
+	key := string(tx.Payload)
+	c.txTimestamps[key] = tx.Timestamp
 }
 
-// Save serializa as métricas coletadas para um arquivo JSON.
-func (c *Collector) Save(filePath string) error {
+// FinalizeTransaction marks the commit time of a transaction and calculates its latency.
+func (c *Collector) FinalizeTransaction(tx *types.Transaction) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	key := string(tx.Payload)
+	if startTime, ok := c.txTimestamps[key]; ok {
+		endTime := time.Now().UnixNano()
+		latency := float64(endTime-startTime) / 1_000_000.0 // Latency in milliseconds
+		c.latencies = append(c.latencies, latency)
+		c.txCount++
+		delete(c.txTimestamps, key)
+	}
+}
+
+// Report calculates and prints the final performance summary.
+func (c *Collector) Report() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Cria o diretório se ele não existir
-	if err := os.MkdirAll(filepath.Dir(filePath), 0755); err != nil {
-		return err
-	}
+	duration := time.Since(c.startTime).Seconds()
+	throughput := float64(c.txCount) / duration
 
-	file, err := os.Create(filePath)
-	if err != nil {
-		return err
+	var totalLatency float64
+	for _, l := range c.latencies {
+		totalLatency += l
 	}
-	defer file.Close()
+	avgLatency := totalLatency / float64(len(c.latencies))
 
-	// Estrutura para a saída JSON
-	output := struct {
-		Events    map[string]int
-		Latencies map[string][]time.Duration
-	}{
-		Events:    c.events,
-		Latencies: c.latencies,
-	}
-
-	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
-	return encoder.Encode(output)
+	log.Println("------ Metrics Report ------")
+	log.Printf("Total execution time: %.2f seconds\n", duration)
+	log.Printf("Total committed transactions: %d\n", c.txCount)
+	log.Printf("Throughput: %.2f TPS\n", throughput)
+	log.Printf("Average latency: %.2f ms\n", avgLatency)
+	log.Println("--------------------------")
 }

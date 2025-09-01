@@ -1,73 +1,54 @@
 package run
 
 import (
-	"babel-bft/internal/core"
-	"babel-bft/internal/metrics"
-	network2 "babel-bft/internal/network"
 	"log"
-	"sync"
 	"time"
+
+	"babel-bft/internal/core"
+	"babel-bft/internal/network"
+	"babel-bft/internal/protocols/tendermint"
 )
 
-// RunLocal executa uma simulação completa na máquina local.
-func RunLocal(nodeCount int, protocol string, duration time.Duration, configFile string) error {
-	log.Printf("Iniciando simulação local com %d nós...", nodeCount)
+// LocalSimulation sets up and runs a BFT consensus simulation in-process.
+// It creates a specified number of nodes and clients, connects them via an
+// in-memory transport layer, and runs the simulation for a fixed duration.
+func LocalSimulation(numNodes, numClients uint, duration time.Duration) {
+	log.Printf("Starting local simulation with %d nodes, %d clients for %s.", numNodes, numClients, duration)
 
-	var wg sync.WaitGroup
-	nodes := make([]*core.Node, nodeCount)
-	collectors := make([]*metrics.Collector, nodeCount)
-	network := network2.NewLocalNetwork(nodeCount)
+	// 1. Initialize the local network transport
+	transport := network.NewLocalTransport(numNodes + numClients)
 
-	// Inicializa todos os nós
-	for i := 0; i < nodeCount; i++ {
-		collectors[i] = metrics.NewCollector()
-		nodes[i] = core.NewNode(i, nodeCount, protocol, collectors[i])
-		nodes[i].SetNetwork(network)
-		network.Register(i, nodes[i].EventQueue)
+	// 2. Create and start the consensus nodes (replicas)
+	nodes := make([]*core.Node, numNodes)
+	for i := uint(0); i < numNodes; i++ {
+		// Each node gets its own instance of the consensus engine
+		engine := tendermint.NewTendermint()
+		nodes[i] = core.NewNode(i, transport, engine, int(numNodes))
+		nodes[i].Start()
 	}
 
-	// Inicia os nós
-	for _, node := range nodes {
-		wg.Add(1)
-		go func(n *core.Node) {
-			defer wg.Done()
-			n.Start()
-		}(node)
+	// 3. Create and start the clients
+	clients := make([]*core.Client, numClients)
+	for i := uint(0); i < numClients; i++ {
+		// Client IDs start after the last node ID
+		clientID := numNodes + i
+		clients[i] = core.NewClient(clientID, transport)
+		clients[i].Start()
 	}
 
-	// Inicia o cliente simulado para gerar carga
-	client := NewClient(nodes, 10*time.Millisecond) // Envia uma transação a cada 10ms
-	stopClient := client.Run()
-
-	// Aguarda a duração do experimento
-	log.Printf("Experimento em andamento por %s...", duration)
+	// 4. Run the simulation for the specified duration
+	log.Printf("Simulation running for %s...", duration)
 	time.Sleep(duration)
 
-	// Para o cliente e os nós
-	log.Println("Parando simulação...")
-	close(stopClient)
+	// 5. Stop all clients and nodes
+	log.Println("Simulation duration ended. Stopping all components...")
+	for _, client := range clients {
+		client.Stop()
+	}
 	for _, node := range nodes {
 		node.Stop()
 	}
-	wg.Wait()
 
-	// Agrega e exibe as métricas
-	aggregateMetrics(collectors)
-
-	log.Println("Simulação local concluída.")
-	return nil
-}
-
-func aggregateMetrics(collectors []*metrics.Collector) {
-	log.Println("\n--- MÉTRICAS AGREGADAS ---")
-	totalBlocks := 0
-	for i, c := range collectors {
-		blocks, ok := c.Events["block_decided"]
-		if ok {
-			log.Printf("Nó %d decidiu %d blocos.", i, blocks)
-			totalBlocks += blocks
-		}
-	}
-	log.Printf("Total de blocos decididos em toda a rede: %d", totalBlocks)
-	log.Println("--------------------------")
+	log.Println("Simulation finished.")
+	// In a real scenario, we would collect and report metrics here.
 }

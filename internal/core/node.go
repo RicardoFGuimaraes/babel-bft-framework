@@ -1,54 +1,88 @@
 package core
 
 import (
-	"babel-bft/internal/metrics"
-	"babel-bft/internal/types"
 	"log"
 	"time"
+
+	"babel-bft/internal/network"
+	"babel-bft/internal/protocols"
+	"babel-bft/internal/types"
 )
 
-// Event representa um evento genérico a ser processado pelo nó.
-
-// Node é a estrutura central que representa um participante do consenso.
+// Node represents a single replica in the BFT system. It is the central component
+// that connects the network transport, the consensus protocol, and the application logic.
 type Node struct {
-	ID         int
-	eventQueue chan types.Event
-	Metrics    *metrics.Collector
-	// Outros campos como:
-	// modules *ModuleRegistry
-	// config *ProtocolConfig
+	id         uint
+	Transport  network.Transport
+	Engine     protocols.Consensus
+	msgChan    chan *types.Message
+	stopChan   chan struct{}
+	quorumSize int
 }
 
-// NewNode cria e inicializa um novo nó.
-func NewNode(id int, metricsCollector *metrics.Collector) *Node {
+// NewNode creates and initializes a new consensus node.
+func NewNode(id uint, transport network.Transport, engine protocols.Consensus, quorum int) *Node {
 	return &Node{
-		ID:         id,
-		eventQueue: make(chan types.Event, 1024), // Buffer para eventos
-		Metrics:    metricsCollector,
+		id:         id,
+		Transport:  transport,
+		Engine:     engine,
+		msgChan:    make(chan *types.Message, 100), // Buffered channel
+		stopChan:   make(chan struct{}),
+		quorumSize: quorum,
 	}
 }
 
-// Start inicia o loop de processamento de eventos do nó.
+// Start initiates the node's main event loop in a separate goroutine.
 func (n *Node) Start() {
-	log.Printf("[Nó %d] Iniciando loop de eventos...", n.ID)
-	go n.eventLoop()
+	log.Printf("Node %d starting...", n.ID)
+	n.Transport.RegisterNodeChan(n.id, n.msgChan)
+	n.Engine.SetNode(n) // Provide the consensus engine with access to the node's interface
+	go n.run()
 }
 
-// eventLoop é o laço principal que consome e processa eventos da fila.
-func (n *Node) eventLoop() {
-	for event := range n.eventQueue {
-		// Simplesmente loga o evento por enquanto.
-		// A lógica real despacharia o evento para o módulo correto.
-		log.Printf("[Nó %d] Processando evento: %T", n.ID, event)
+// Stop terminates the node's event loop.
+func (n *Node) Stop() {
+	close(n.stopChan)
+}
 
-		// Exemplo de como um módulo seria invocado e metrificado
-		startTime := time.Now()
-		// n.modules.Coordination.HandleEvent(event)
-		n.Metrics.RecordLatency("event_processing", time.Since(startTime))
+// The main event loop of the node. It listens for incoming messages
+// and passes them to the consensus engine for processing.
+func (n *Node) run() {
+	log.Printf("Node %d is running.", n.ID)
+	for {
+		select {
+		case msg := <-n.msgChan:
+			// Forward the message to the consensus engine
+			n.Engine.HandleMessage(msg.From, msg)
+		case <-n.stopChan:
+			log.Printf("Node %d stopping.", n.ID)
+			return
+		}
 	}
 }
 
-// SubmitEvent adiciona um novo evento à fila de processamento do nó.
-func (n *Node) SubmitEvent(e types.Event) {
-	n.eventQueue <- e
+// Broadcast sends a message to all other nodes in the network.
+// This method implements the types.NodeInterface.
+func (n *Node) Broadcast(msg *types.Message) {
+	msg.From = n.ID
+	n.Transport.Broadcast(msg)
+}
+
+// Send directs a message to a specific recipient node.
+// This method implements the types.NodeInterface.
+func (n *Node) Send(recipientID uint, msg *types.Message) {
+	msg.From = n.ID
+	n.Transport.Send(recipientID, msg)
+}
+
+// id returns the node's unique identifier.
+// This method implements the types.NodeInterface.
+func (n *Node) ID() uint {
+	return n.id
+}
+
+// QuorumSize returns the number of replicas in the system.
+// This method implements the types.NodeInterface.
+func (n *Node) QuorumSize() int {
+	return n.quorumSize
 }
